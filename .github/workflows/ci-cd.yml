@@ -1,0 +1,21 @@
+# CI/CD for characterbuilder_api — private service: tests/lint/build only, no npm publish
+name: CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: write
+  id-token: write
+  deployments: write
+
+jobs:
+  cicd:
+    uses: johnqh/workflows/.github/workflows/unified-cicd.yml@main
+    with:
+      npm-access: "restricted"
+      skip-npm-publish: true
+    secrets: inherit
