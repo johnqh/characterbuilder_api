@@ -61,8 +61,7 @@ export function getStorage(): StorageDriver {
   return driver;
 }
 
-/** Public URL the client uses to fetch a stored image by its image id. */
+/** Relative path the client uses to fetch a stored image by its image id. */
 export function imageUrl(imageId: string): string {
-  const base = getEnv('PUBLIC_API_URL', '')!.replace(/\/+$/, '');
-  return `${base}/api/v1/images/${imageId}`;
+  return `/api/v1/images/${imageId}`;
 }
