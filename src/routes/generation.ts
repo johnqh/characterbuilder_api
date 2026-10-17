@@ -13,6 +13,7 @@ import {
   listGenerations,
   loadGeneration,
 } from '../services/generation';
+import { ensureUser } from '../services/users';
 import { validate } from './util';
 
 const router = new Hono();
@@ -22,9 +23,12 @@ router.post('/compose', validate('json', composeRequestSchema), async (c) => {
   return c.json(successResponse<ComposeResponse>({ prompt }));
 });
 
-router.post('/generate', validate('json', generateRequestSchema), async (c) =>
-  c.json(successResponse(await generate(c.get('userId'), c.req.valid('json'))))
-);
+router.post('/generate', validate('json', generateRequestSchema), async (c) => {
+  // Persisting a generation FKs to users(id); ensure the row exists for a
+  // signed-in user who generates before ever calling GET /me.
+  await ensureUser(c.get('principal'));
+  return c.json(successResponse(await generate(c.get('userId'), c.req.valid('json'))));
+});
 
 router.get('/generations', validate('query', cursorQuerySchema), async (c) => {
   const { limit, cursor } = c.req.valid('query');

@@ -12,6 +12,7 @@ import {
   listCharacters,
   updateCharacter,
 } from '../services/characters';
+import { ensureUser } from '../services/users';
 import { validate } from './util';
 
 const router = new Hono();
@@ -23,12 +24,15 @@ router.get('/', validate('query', cursorQuerySchema), async (c) => {
   );
 });
 
-router.post('/', validate('json', createCharacterRequestSchema), async (c) =>
-  c.json(
+router.post('/', validate('json', createCharacterRequestSchema), async (c) => {
+  // characters.user_id FKs to users(id); onboard a signed-in user who creates
+  // a character before ever calling GET /me.
+  await ensureUser(c.get('principal'));
+  return c.json(
     successResponse(await createCharacter(c.get('userId'), c.req.valid('json'))),
     201
-  )
-);
+  );
+});
 
 router.get('/:id', async (c) =>
   c.json(successResponse(await getCharacter(c.get('userId'), c.req.param('id'))))
