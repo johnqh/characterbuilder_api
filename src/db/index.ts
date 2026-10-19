@@ -93,6 +93,21 @@ export async function initDatabase(): Promise<void> {
     )`;
   await sql`CREATE INDEX IF NOT EXISTS generation_images_gen_idx ON generation_images (generation_id)`;
 
+  // Jobs migration (forward-only): generations became async job rows. Each job
+  // carries a base spec + demographics the caster fills per image, reserves
+  // credits while running, and records a finish time.
+  await sql`ALTER TABLE generations ADD COLUMN IF NOT EXISTS spec JSONB`;
+  await sql`ALTER TABLE generations ADD COLUMN IF NOT EXISTS demographics JSONB`;
+  await sql`ALTER TABLE generations ADD COLUMN IF NOT EXISTS reserved_credits INTEGER NOT NULL DEFAULT 0`;
+  await sql`ALTER TABLE generations ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE generations ALTER COLUMN prompt DROP NOT NULL`;
+  await sql`ALTER TABLE generation_images ADD COLUMN IF NOT EXISTS spec JSONB`;
+  await sql`ALTER TABLE generation_images ADD COLUMN IF NOT EXISTS prompt TEXT`;
+  // At most one running job per user — the real concurrency guarantee (an
+  // app-level check races under READ COMMITTED). A losing promotion is a no-op.
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS generations_one_running_per_user
+      ON generations (user_id) WHERE status = 'running'`;
+
   // consumables ledger (consumables_service shape)
   await sql`
     CREATE TABLE IF NOT EXISTS consumable_balances (

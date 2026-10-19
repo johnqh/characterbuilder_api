@@ -13,7 +13,11 @@ import {
   serial,
   varchar,
 } from 'drizzle-orm/pg-core';
-import type { FaceSpec, GenerationParams } from '@sudobility/characterbuilder_types';
+import type {
+  Demographics,
+  FaceSpec,
+  GenerationParams,
+} from '@sudobility/characterbuilder_types';
 
 export const users = pgTable('users', {
   id: text('id').primaryKey(),
@@ -40,13 +44,22 @@ export const generations = pgTable('generations', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull(),
   characterId: text('character_id'),
-  prompt: text('prompt').notNull(),
+  // The job's inputs: a base (partial) spec the caster fills per image, plus the
+  // demographics that steer that casting. `prompt` holds the first image's prompt
+  // (kept for history; each image records its own prompt on generation_images).
+  spec: jsonb('spec').$type<FaceSpec>(),
+  demographics: jsonb('demographics').$type<Demographics>(),
+  prompt: text('prompt'),
   params: jsonb('params').$type<GenerationParams>().notNull(),
   status: text('status').notNull().default('pending'),
   creditsSpent: integer('credits_spent').notNull().default(0),
+  reservedCredits: integer('reserved_credits').notNull().default(0),
   error: text('error'),
   idempotencyKey: text('idempotency_key'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  finishedAt: timestamp('finished_at', { withTimezone: true }),
 });
 
 export const generationImages = pgTable('generation_images', {
@@ -55,9 +68,14 @@ export const generationImages = pgTable('generation_images', {
   userId: text('user_id').notNull(),
   storageKey: text('storage_key').notNull(),
   mimeType: text('mime_type').notNull().default('image/png'),
+  // The fully-cast spec and composed prompt that produced THIS image.
+  spec: jsonb('spec').$type<FaceSpec>(),
+  prompt: text('prompt'),
   width: integer('width'),
   height: integer('height'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .notNull()
+    .defaultNow(),
 });
 
 /* ── consumables ledger (consumables_service shape) ── */

@@ -5,6 +5,7 @@ import { getEnv } from './lib/env-helper';
 import { log } from './lib/log';
 import { initDatabase, closeDatabase } from './db';
 import { shapeShyftConfigured } from './lib/env-helper';
+import { recoverOrphanedJobs } from './services/jobs';
 
 const problems = bootProblems();
 if (problems.length > 0) {
@@ -31,6 +32,12 @@ if (getEnv('SKIP_DB_INIT', '0') !== '1') {
   } catch (err) {
     log('error', 'failed to initialise database', { error: String(err) });
     process.exit(1);
+  }
+  // Fail jobs orphaned by a previous crash and resume any stranded queue.
+  try {
+    await recoverOrphanedJobs();
+  } catch (err) {
+    log('error', 'job recovery failed', { error: String(err) });
   }
 }
 

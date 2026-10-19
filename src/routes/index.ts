@@ -16,6 +16,7 @@ routes.use('/me/*', requireAuth);
 routes.use('/characters', requireAuth);
 routes.use('/characters/*', requireAuth);
 routes.use('/compose', requireAuth);
+routes.use('/distributions', requireAuth);
 routes.use('/generate', requireAuth);
 routes.use('/generations', requireAuth);
 routes.use('/generations/*', requireAuth);

@@ -2,21 +2,18 @@ import { and, desc, eq, lt } from 'drizzle-orm';
 import {
   composePrompt,
   generationParamsSchema,
-  makeId,
   type ComposeRequest,
   type Generation,
   type GeneratedImage,
   type GenerateRequest,
-  type GenerationParams,
   type FaceSpec,
   type Paginated,
 } from '@sudobility/characterbuilder_types';
 import { getDb, generations, generationImages } from '../db';
 import { HttpError } from '../lib/errors';
-import { getBalance, spend } from './credits';
 import { getStorage, imageUrl } from './storage';
-import { generateImage } from './shapeshyft';
 import { getCharacter } from './characters';
+import { enqueueGeneration } from './jobs';
 
 /** Resolve the FaceSpec from either a saved character or the inline spec. */
 async function resolveSpec(
@@ -39,9 +36,6 @@ export async function compose(
   return composePrompt(spec, params);
 }
 
-const imageKey = (userId: string, generationId: string, imageId: string) =>
-  `images/${userId}/${generationId}/${imageId}.png`;
-
 function toGeneratedImage(row: typeof generationImages.$inferSelect): GeneratedImage {
   return {
     id: row.id,
@@ -49,18 +43,21 @@ function toGeneratedImage(row: typeof generationImages.$inferSelect): GeneratedI
     url: imageUrl(row.id),
     width: row.width,
     height: row.height,
+    spec: row.spec ?? undefined,
+    prompt: row.prompt ?? undefined,
   };
 }
 
-/** The whole generate flow: credits gate -> render N -> store -> persist -> charge. */
+/**
+ * Enqueue an async generation job and return it in its initial `pending` state.
+ * The job reserves credits up front, then a background runner casts a fresh spec
+ * per image, renders, stores, and settles. Clients poll GET /generations/:id.
+ */
 export async function generate(
   userId: string,
   req: GenerateRequest
 ): Promise<Generation> {
-  const params: GenerationParams = generationParamsSchema.parse(req.params);
-  const cost = params.count;
-
-  // Idempotent replay: a retried request with the same key returns the first result.
+  // Idempotent replay: a retried request with the same key returns the first job.
   if (req.idempotencyKey) {
     const [existing] = await getDb()
       .select()
@@ -74,56 +71,8 @@ export async function generate(
     if (existing) return await loadGeneration(userId, existing.id);
   }
 
-  const { spec, characterId } = await resolveSpec(userId, req);
-  const prompt = composePrompt(spec, params);
-
-  const balance = await getBalance(userId);
-  if (balance.balance < cost) {
-    throw new HttpError('INSUFFICIENT_CREDITS', 'Not enough credits', {
-      required: cost,
-      balance: balance.balance,
-    });
-  }
-
-  // Render all images first; a failure here charges nothing and persists nothing.
-  const rendered: { bytes: Uint8Array; mimeType: string }[] = [];
-  for (let i = 0; i < cost; i++) {
-    rendered.push(await generateImage(prompt, req.referenceImage));
-  }
-
-  const generationId = makeId('generation', crypto.randomUUID().replace(/-/g, ''));
-  const storage = getStorage();
-  const imageRows: (typeof generationImages.$inferInsert)[] = [];
-  for (const r of rendered) {
-    const imageId = makeId('image', crypto.randomUUID().replace(/-/g, ''));
-    const key = imageKey(userId, generationId, imageId);
-    await storage.put(key, r.bytes, r.mimeType);
-    imageRows.push({
-      id: imageId,
-      generationId,
-      userId,
-      storageKey: key,
-      mimeType: r.mimeType,
-      width: null,
-      height: null,
-    });
-  }
-
-  await getDb().insert(generations).values({
-    id: generationId,
-    userId,
-    characterId,
-    prompt,
-    params,
-    status: 'succeeded',
-    creditsSpent: cost,
-    error: null,
-    idempotencyKey: req.idempotencyKey ?? null,
-  });
-  await getDb().insert(generationImages).values(imageRows);
-  await spend(userId, cost, `gen:${generationId}`);
-
-  return await loadGeneration(userId, generationId);
+  const id = await enqueueGeneration(userId, req);
+  return await loadGeneration(userId, id);
 }
 
 export async function loadGeneration(
@@ -142,7 +91,7 @@ export async function loadGeneration(
   return {
     id: gen.id,
     characterId: gen.characterId,
-    prompt: gen.prompt,
+    prompt: gen.prompt ?? '',
     params: gen.params,
     status: gen.status as Generation['status'],
     images: imgs.map(toGeneratedImage),

@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import {
   composeRequestSchema,
   cursorQuerySchema,
+  distributionRequestSchema,
   generateRequestSchema,
   successResponse,
   type ComposeResponse,
@@ -13,6 +14,7 @@ import {
   listGenerations,
   loadGeneration,
 } from '../services/generation';
+import { getDistributions } from '../services/distribution';
 import { ensureUser } from '../services/users';
 import { validate } from './util';
 
@@ -22,6 +24,14 @@ router.post('/compose', validate('json', composeRequestSchema), async (c) => {
   const prompt = await compose(c.get('userId'), c.req.valid('json'));
   return c.json(successResponse<ComposeResponse>({ prompt }));
 });
+
+// Demographics -> per-trait probability maps (odds the UI can show; the generate
+// flow samples these to cast unset traits). Pure compute, no DB.
+router.post(
+  '/distributions',
+  validate('json', distributionRequestSchema),
+  async (c) => c.json(successResponse(await getDistributions(c.req.valid('json'))))
+);
 
 router.post('/generate', validate('json', generateRequestSchema), async (c) => {
   // Persisting a generation FKs to users(id); ensure the row exists for a

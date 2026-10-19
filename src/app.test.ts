@@ -39,10 +39,30 @@ describe('characterbuilder_api app', () => {
           'content-type': 'application/json',
           authorization: 'Bearer dev:u1:a@b.co',
         },
-        body: JSON.stringify({}),
+        // Both characterId and spec is the one disallowed combo (an empty body
+        // is now valid — the API casts every trait).
+        body: JSON.stringify({ characterId: 'chr_x', spec: {} }),
       })
     );
     expect(r.status).toBe(400);
     expect(r.body?.code).toBe('VALIDATION');
+  });
+
+  it('returns trait distributions for demographics without a database', async () => {
+    process.env.AUTH_TEST_MODE = '1';
+    const r = await call(
+      new Request('http://t/api/v1/distributions', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer dev:u1:a@b.co',
+        },
+        body: JSON.stringify({ ancestry: 'east-asian', sex: 'female' }),
+      })
+    );
+    expect(r.status).toBe(200);
+    const data = (r.body as { data?: { distributions?: Record<string, unknown> } })
+      .data;
+    expect(data?.distributions?.hairTexture).toBeTruthy();
   });
 });

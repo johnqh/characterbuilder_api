@@ -4,9 +4,39 @@
  * model live on the ShapeShyft endpoint, never here. Adapted from
  * screenwriter_api's `services/ai/transport.ts` + `image-output.ts`.
  */
+import {
+  FACE_FEATURE_VALUES,
+  faceDistributionsSchema,
+  type Demographics,
+  type FaceDistributions,
+  type FaceSpec,
+} from '@sudobility/characterbuilder_types';
 import { getEnv, shapeShyftConfigured } from '../lib/env-helper';
 import { HttpError } from '../lib/errors';
 import { log } from '../lib/log';
+
+/** Every enum trait the complete spec must carry before it may reach ShapeShyft. */
+const REQUIRED_TRAIT_KEYS = Object.keys(FACE_FEATURE_VALUES);
+
+/**
+ * The hard completeness gate (requirement R3): a spec sent to ShapeShyft MUST
+ * have every enum trait set. ShapeShyft's platform does not validate request
+ * input against an endpoint's input_schema, so this is where "all traits
+ * required" is actually enforced — the last characterbuilder-controlled point
+ * before the call. A missing trait is a caster bug and fails loudly rather than
+ * silently letting the model free-choose (which is what causes the sameness).
+ */
+export function assertCompleteSpec(traits: FaceSpec): void {
+  const missing = REQUIRED_TRAIT_KEYS.filter(
+    (k) => (traits as Record<string, unknown>)[k] == null
+  );
+  if (missing.length > 0) {
+    throw new HttpError(
+      'AI_OUTPUT_INVALID',
+      `Incomplete FaceSpec sent to ShapeShyft — missing ${missing.length} trait(s): ${missing.slice(0, 8).join(', ')}${missing.length > 8 ? '…' : ''}`
+    );
+  }
+}
 
 interface ShapeShyftMedia {
   type: string;
@@ -35,6 +65,14 @@ const isValidPng = (b: Buffer) =>
 
 function endpointName(): string {
   return getEnv('SHAPESHYFT_IMAGE_ENDPOINT', 'character-image')!;
+}
+
+function promptEndpointName(): string {
+  return getEnv('SHAPESHYFT_PROMPT_ENDPOINT', 'character-prompt')!;
+}
+
+function distributionEndpointName(): string {
+  return getEnv('SHAPESHYFT_DISTRIBUTION_ENDPOINT', 'character-distribution')!;
 }
 
 function timeoutMs(): number {
@@ -121,4 +159,116 @@ export async function generateImage(
 
   log('info', '[image] generated', { endpoint: name, ms: Date.now() - started });
   return { bytes, mimeType: 'image/png' };
+}
+
+/**
+ * Stage 1 of the two-stage pipeline: send the COMPLETE cast FaceSpec to the
+ * `character-prompt` text endpoint and get back a polished prose prompt. The
+ * runner falls back to the local `composePrompt` if this throws (endpoint
+ * unconfigured or failing), so generation never hard-depends on it.
+ */
+export async function composeRemote(
+  traits: FaceSpec,
+  shot?: string,
+  expression?: string
+): Promise<string> {
+  assertCompleteSpec(traits);
+  const base = getEnv('SHAPESHYFT_ENDPOINT_URL');
+  const key = getEnv('SHAPESHYFT_API_KEY');
+  if (!base || !key || !shapeShyftConfigured()) {
+    throw new HttpError('AI_UNAVAILABLE', 'Prompt endpoint is not configured');
+  }
+  const name = promptEndpointName();
+  const url = `${base.replace(/\/+$/, '')}/${name}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs());
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({ traits, shot, expression }),
+      signal: controller.signal,
+    });
+    const body = (await response.json()) as ShapeShyftBody;
+    if (!response.ok || body.success === false) {
+      throw new HttpError(
+        'AI_GENERATION_FAILED',
+        `ShapeShyft ${name} failed: ${body.error ?? `HTTP ${response.status}`}`
+      );
+    }
+    const output = (body.data?.output ?? body.output) as
+      | { prompt?: unknown }
+      | undefined;
+    const prompt = output?.prompt;
+    if (typeof prompt !== 'string' || prompt.trim().length === 0) {
+      throw new HttpError('AI_OUTPUT_INVALID', `${name} returned no prompt`);
+    }
+    return prompt;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The hybrid's LLM half (requirement A): ask the `character-distribution`
+ * endpoint to shift per-trait odds for a named sub-population / health nuance
+ * that the static tables only know at the broad-ancestry level. Returns
+ * per-trait probability OVERRIDES (sanitized to known traits + allowed values);
+ * `{}` when the model declines or returns nothing usable. Throws only when the
+ * endpoint is unconfigured/unreachable, so callers can fall back to the static base.
+ */
+export async function refineDistributionsRemote(
+  demo: Demographics
+): Promise<FaceDistributions> {
+  const base = getEnv('SHAPESHYFT_ENDPOINT_URL');
+  const key = getEnv('SHAPESHYFT_API_KEY');
+  if (!base || !key || !shapeShyftConfigured()) {
+    throw new HttpError('AI_UNAVAILABLE', 'Distribution endpoint is not configured');
+  }
+  const name = distributionEndpointName();
+  const url = `${base.replace(/\/+$/, '')}/${name}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs());
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({ demographics: demo, vocabulary: FACE_FEATURE_VALUES }),
+      signal: controller.signal,
+    });
+    const body = (await response.json()) as ShapeShyftBody;
+    if (!response.ok || body.success === false) {
+      throw new HttpError(
+        'AI_GENERATION_FAILED',
+        `ShapeShyft ${name} failed: ${body.error ?? `HTTP ${response.status}`}`
+      );
+    }
+    const output = (body.data?.output ?? body.output) as
+      | { distributions?: unknown }
+      | undefined;
+    const parsed = faceDistributionsSchema.safeParse(output?.distributions ?? {});
+    if (!parsed.success) return {};
+    // Keep only real traits + their allowed values, so a stray key/value from
+    // the model can never make the caster pick something invalid.
+    const clean: Record<string, Record<string, number>> = {};
+    for (const [trait, dist] of Object.entries(parsed.data)) {
+      const allowed = FACE_FEATURE_VALUES[trait as keyof typeof FACE_FEATURE_VALUES] as
+        | readonly string[]
+        | undefined;
+      if (!allowed) continue;
+      const entries = Object.entries(dist).filter(
+        ([v, p]) => allowed.includes(v) && p > 0
+      );
+      if (entries.length > 0) clean[trait] = Object.fromEntries(entries);
+    }
+    return clean as FaceDistributions;
+  } finally {
+    clearTimeout(timer);
+  }
 }
