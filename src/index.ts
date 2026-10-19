@@ -41,7 +41,7 @@ if (getEnv('SKIP_DB_INIT', '0') !== '1') {
   }
 }
 
-const port = parseInt(getEnv('PORT', '8040')!, 10);
+const port = parseInt(getEnv('PORT', '8039')!, 10);
 log('info', `characterbuilder_api listening on :${port}`);
 
 process.on('SIGTERM', async () => {
