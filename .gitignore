@@ -3,3 +3,7 @@ dist/
 .storage/
 .env*
 !.env.example
+# Local MCP config (hardcoded local paths); keep it untracked.
+.mcp.json
+# Throwaway/debug scripts at the repo root (e.g. _dbg.ts, _smoke.ts).
+/_*.ts
