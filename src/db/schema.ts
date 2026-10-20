@@ -51,6 +51,10 @@ export const generations = pgTable('generations', {
   demographics: jsonb('demographics').$type<Demographics>(),
   prompt: text('prompt'),
   params: jsonb('params').$type<GenerationParams>().notNull(),
+  // The single-image `face` flow, or a sheet stage; and, for a sheet, the prior
+  // image it was conditioned on.
+  kind: text('kind').notNull().default('face'),
+  sourceImageId: text('source_image_id'),
   status: text('status').notNull().default('pending'),
   creditsSpent: integer('credits_spent').notNull().default(0),
   reservedCredits: integer('reserved_credits').notNull().default(0),
@@ -71,6 +75,8 @@ export const generationImages = pgTable('generation_images', {
   // The fully-cast spec and composed prompt that produced THIS image.
   spec: jsonb('spec').$type<FaceSpec>(),
   prompt: text('prompt'),
+  // For a sheet image, its view/direction label (e.g. `front`, `back-left`).
+  role: text('role'),
   width: integer('width'),
   height: integer('height'),
   createdAt: timestamp('created_at', { withTimezone: true })

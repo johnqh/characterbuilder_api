@@ -8,12 +8,13 @@ import {
   type GenerateRequest,
   type FaceSpec,
   type Paginated,
+  type SheetRequest,
 } from '@sudobility/characterbuilder_types';
 import { getDb, generations, generationImages } from '../db';
 import { HttpError } from '../lib/errors';
 import { getStorage, imageUrl } from './storage';
 import { getCharacter } from './characters';
-import { enqueueGeneration } from './jobs';
+import { enqueueGeneration, enqueueSheet } from './jobs';
 
 /** Resolve the FaceSpec from either a saved character or the inline spec. */
 async function resolveSpec(
@@ -45,6 +46,7 @@ function toGeneratedImage(row: typeof generationImages.$inferSelect): GeneratedI
     height: row.height,
     spec: row.spec ?? undefined,
     prompt: row.prompt ?? undefined,
+    role: row.role ?? undefined,
   };
 }
 
@@ -75,6 +77,82 @@ export async function generate(
   return await loadGeneration(userId, id);
 }
 
+/** Resolve a stored image the user owns into a `data:` reference string. */
+async function referenceFromImage(userId: string, imageId: string): Promise<string> {
+  const { bytes, mimeType } = await getImageBytes(userId, imageId);
+  const b64 = Buffer.from(bytes).toString('base64');
+  return `data:${mimeType};base64,${b64}`;
+}
+
+/**
+ * Enqueue a staged sheet job (head / body / clothed) and return it `pending`.
+ * The conditioning image is resolved here: stage 1 may use an uploaded
+ * `referenceImage` (data URL) or a selected `sourceImageId`; stages 2–3 always
+ * resolve the selected `sourceImageId`'s bytes. The provider returns the whole
+ * sheet in one call (split by the runner).
+ */
+export async function createSheet(
+  userId: string,
+  req: SheetRequest
+): Promise<Generation> {
+  if (req.idempotencyKey) {
+    const [existing] = await getDb()
+      .select()
+      .from(generations)
+      .where(
+        and(
+          eq(generations.userId, userId),
+          eq(generations.idempotencyKey, req.idempotencyKey)
+        )
+      );
+    if (existing) return await loadGeneration(userId, existing.id);
+  }
+
+  // Validate the owning character (if any) before spending credits — throws
+  // CHARACTER_NOT_FOUND for a missing or someone else's character.
+  if (req.characterId) await getCharacter(userId, req.characterId);
+
+  let referenceImage: string;
+
+  if (req.kind === 'head-sheet') {
+    if (req.referenceImage && req.sourceImageId) {
+      throw new HttpError('VALIDATION', 'Provide exactly one of sourceImageId or referenceImage');
+    }
+    if (req.referenceImage) {
+      referenceImage = req.referenceImage;
+    } else if (req.sourceImageId) {
+      referenceImage = await referenceFromImage(userId, req.sourceImageId);
+    } else {
+      throw new HttpError('VALIDATION', 'A head sheet needs a sourceImageId or an uploaded referenceImage');
+    }
+    const id = await enqueueSheet(userId, req, {
+      kind: 'head-sheet',
+      referenceImage,
+      traits: req.traits,
+    });
+    return await loadGeneration(userId, id);
+  }
+
+  if (req.kind === 'body-sheet') {
+    referenceImage = await referenceFromImage(userId, req.sourceImageId);
+    const id = await enqueueSheet(userId, req, {
+      kind: 'body-sheet',
+      referenceImage,
+      body: req.body,
+    });
+    return await loadGeneration(userId, id);
+  }
+
+  // clothed-sheet
+  referenceImage = await referenceFromImage(userId, req.sourceImageId);
+  const clothedId = await enqueueSheet(userId, req, {
+    kind: 'clothed-sheet',
+    referenceImage,
+    wardrobe: req.wardrobe,
+  });
+  return await loadGeneration(userId, clothedId);
+}
+
 export async function loadGeneration(
   userId: string,
   id: string
@@ -98,6 +176,8 @@ export async function loadGeneration(
     creditsSpent: gen.creditsSpent,
     error: gen.error,
     createdAt: gen.createdAt.toISOString(),
+    kind: gen.kind ?? 'face',
+    sourceImageId: gen.sourceImageId,
   };
 }
 

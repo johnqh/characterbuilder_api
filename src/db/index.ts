@@ -103,6 +103,12 @@ export async function initDatabase(): Promise<void> {
   await sql`ALTER TABLE generations ALTER COLUMN prompt DROP NOT NULL`;
   await sql`ALTER TABLE generation_images ADD COLUMN IF NOT EXISTS spec JSONB`;
   await sql`ALTER TABLE generation_images ADD COLUMN IF NOT EXISTS prompt TEXT`;
+  // Sheet pipeline (forward-only): a generation has a kind (face | head-sheet |
+  // body-sheet | clothed-sheet) and, for a sheet, the prior image it conditions
+  // on; each image carries its view/direction role.
+  await sql`ALTER TABLE generations ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'face'`;
+  await sql`ALTER TABLE generations ADD COLUMN IF NOT EXISTS source_image_id TEXT`;
+  await sql`ALTER TABLE generation_images ADD COLUMN IF NOT EXISTS role TEXT`;
   // At most one running job per user — the real concurrency guarantee (an
   // app-level check races under READ COMMITTED). A losing promotion is a no-op.
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS generations_one_running_per_user

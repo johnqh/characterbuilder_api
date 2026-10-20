@@ -4,11 +4,13 @@ import {
   cursorQuerySchema,
   distributionRequestSchema,
   generateRequestSchema,
+  sheetRequestSchema,
   successResponse,
   type ComposeResponse,
 } from '@sudobility/characterbuilder_types';
 import {
   compose,
+  createSheet,
   generate,
   getImageBytes,
   listGenerations,
@@ -38,6 +40,14 @@ router.post('/generate', validate('json', generateRequestSchema), async (c) => {
   // signed-in user who generates before ever calling GET /me.
   await ensureUser(c.get('principal'));
   return c.json(successResponse(await generate(c.get('userId'), c.req.valid('json'))));
+});
+
+// Staged sheet generation (head / body / clothed). Must be registered before
+// any `/generate/:x` param routes (there are none) — a literal path, so order
+// is not load-bearing, but keep it next to /generate for clarity.
+router.post('/generate/sheet', validate('json', sheetRequestSchema), async (c) => {
+  await ensureUser(c.get('principal'));
+  return c.json(successResponse(await createSheet(c.get('userId'), c.req.valid('json'))));
 });
 
 router.get('/generations', validate('query', cursorQuerySchema), async (c) => {

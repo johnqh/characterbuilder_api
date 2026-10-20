@@ -39,9 +39,9 @@ describe('characterbuilder_api app', () => {
           'content-type': 'application/json',
           authorization: 'Bearer dev:u1:a@b.co',
         },
-        // Both characterId and spec is the one disallowed combo (an empty body
-        // is now valid — the API casts every trait).
-        body: JSON.stringify({ characterId: 'chr_x', spec: {} }),
+        // Schema-invalid (count is 1..10) — rejected by the validator before any
+        // DB access. (characterId + spec together is now valid: it associates.)
+        body: JSON.stringify({ params: { count: 99 } }),
       })
     );
     expect(r.status).toBe(400);

@@ -19,25 +19,51 @@
  */
 import { and, asc, eq } from 'drizzle-orm';
 import {
+  SHEET_EXPECTED_COUNT,
+  SHEET_ROLES,
   castFaceSpec,
   composePrompt,
   generationParamsSchema,
   makeId,
+  type BodySpec,
   type Demographics,
   type FaceSpec,
   type GenerateRequest,
+  type HeadSheetTraits,
+  type SheetKind,
+  type SheetRequest,
+  type WardrobeSpec,
 } from '@sudobility/characterbuilder_types';
 import { generationImages, generations, getDb } from '../db';
 import { HttpError } from '../lib/errors';
 import { log } from '../lib/log';
 import { releaseCredits, reserveCredits } from './credits';
 import { getStorage } from './storage';
-import { assertCompleteSpec, composeRemote, generateImage } from './shapeshyft';
+import {
+  assertCompleteSpec,
+  composeRemote,
+  composeSheetPrompt,
+  generateImage,
+  generateSheet,
+  sheetEndpointName,
+} from './shapeshyft';
 import { getDistributions } from './distribution';
 import { getCharacter } from './characters';
 
 /** Transient reference images, keyed by job id (never persisted — see header). */
 const pendingReferenceImages = new Map<string, string>();
+
+/** The transient inputs for a sheet job (the resolved reference + stage input). */
+interface SheetJobData {
+  kind: SheetKind;
+  /** The resolved `data:` reference image (from the selected image or an upload). */
+  referenceImage: string;
+  traits?: HeadSheetTraits;
+  body?: BodySpec;
+  wardrobe?: WardrobeSpec;
+}
+/** Transient sheet-job inputs, keyed by job id (not persisted, like the above). */
+const pendingSheetJobs = new Map<string, SheetJobData>();
 
 /** The render step, injectable so tests can stub the provider. */
 export type RenderFn = (
@@ -55,16 +81,28 @@ export function resetRenderImage(): void {
 const imageKey = (userId: string, generationId: string, imageId: string) =>
   `images/${userId}/${generationId}/${imageId}.png`;
 
-/** Resolve the base (partial) spec: a saved character's, or the inline spec. */
+/**
+ * Resolve the base (partial) spec and the owning character. An inline `spec`
+ * (the editor's live draft) is rendered as-is, but the generation is still
+ * associated with `characterId` when one is given — so the images land in that
+ * character's gallery. Passing a `characterId` always validates ownership
+ * (`getCharacter` throws for someone else's / a missing character).
+ */
 async function resolveBaseSpec(
   userId: string,
   req: { characterId?: string; spec?: FaceSpec }
 ): Promise<{ spec: FaceSpec; characterId: string | null }> {
+  if (req.spec) {
+    const characterId = req.characterId
+      ? (await getCharacter(userId, req.characterId)).id
+      : null;
+    return { spec: req.spec, characterId };
+  }
   if (req.characterId) {
     const character = await getCharacter(userId, req.characterId);
     return { spec: character.spec, characterId: character.id };
   }
-  return { spec: req.spec ?? {}, characterId: null };
+  return { spec: {}, characterId: null };
 }
 
 /**
@@ -132,6 +170,69 @@ export async function enqueueGeneration(
   return id;
 }
 
+/**
+ * Create a sheet job (head/body/clothed). Reserves the stage's expected image
+ * count up front (settled to what the provider actually returns), persists a
+ * pending row tagged with `kind` + `sourceImageId`, and stashes the resolved
+ * reference + stage input transiently (like `referenceImage`, not persisted).
+ */
+export async function enqueueSheet(
+  userId: string,
+  req: SheetRequest,
+  data: SheetJobData
+): Promise<string> {
+  const cost = SHEET_EXPECTED_COUNT[req.kind];
+  const id = makeId('generation', crypto.randomUUID().replace(/-/g, ''));
+
+  const reserved = await reserveCredits(userId, cost, `gen:${id}`);
+  if (!reserved.success) {
+    throw new HttpError('INSUFFICIENT_CREDITS', 'Not enough credits', {
+      required: cost,
+      balance: reserved.balance,
+    });
+  }
+
+  try {
+    await getDb()
+      .insert(generations)
+      .values({
+        id,
+        userId,
+        characterId: req.characterId ?? null,
+        spec: null,
+        demographics: null,
+        prompt: null,
+        params: generationParamsSchema.parse({ count: cost }),
+        kind: req.kind,
+        sourceImageId: req.sourceImageId ?? null,
+        status: 'pending',
+        creditsSpent: 0,
+        reservedCredits: cost,
+        error: null,
+        idempotencyKey: req.idempotencyKey ?? null,
+      });
+  } catch (err) {
+    await releaseCredits(userId, cost, `gen:${id}`);
+    if (req.idempotencyKey) {
+      const [existing] = await getDb()
+        .select({ id: generations.id })
+        .from(generations)
+        .where(
+          and(
+            eq(generations.userId, userId),
+            eq(generations.idempotencyKey, req.idempotencyKey)
+          )
+        );
+      if (existing) return existing.id;
+    }
+    throw err;
+  }
+
+  pendingSheetJobs.set(id, data);
+  startNext(userId);
+  return id;
+}
+
 /** Flip the user's oldest pending job to running; null if none / lost the slot. */
 async function promoteNext(userId: string): Promise<string | null> {
   const [next] = await getDb()
@@ -184,6 +285,12 @@ export async function runJob(id: string): Promise<void> {
     .from(generations)
     .where(eq(generations.id, id));
   if (!job || job.status !== 'running') return;
+
+  // Sheet jobs take a different path: one provider call returns the whole sheet.
+  if (job.kind && job.kind !== 'face') {
+    await runSheetJob(job);
+    return;
+  }
 
   const userId = job.userId;
   const params = generationParamsSchema.parse(job.params);
@@ -266,6 +373,75 @@ export async function runJob(id: string): Promise<void> {
     cost,
     ms: Date.now() - started,
   });
+
+  startNext(userId);
+}
+
+/**
+ * Render a sheet job: compose the stage prompt, make ONE provider call that
+ * returns the whole sheet, store each image tagged with its view/direction
+ * role, then settle credits (release any the provider didn't deliver).
+ */
+async function runSheetJob(job: typeof generations.$inferSelect): Promise<void> {
+  const { id, userId } = job;
+  const kind = job.kind as SheetKind;
+  const reserved = job.reservedCredits;
+  const data = pendingSheetJobs.get(id);
+  pendingSheetJobs.delete(id);
+
+  const started = Date.now();
+  const storage = getStorage();
+  const imageRows: (typeof generationImages.$inferInsert)[] = [];
+  let prompt: string | null = null;
+  let error: string | null = null;
+
+  try {
+    if (!data) {
+      // Inputs are transient; a job that outlived a restart has lost them.
+      throw new Error('Sheet inputs were lost (likely a server restart)');
+    }
+    prompt = composeSheetPrompt(kind, {
+      traits: data.traits,
+      body: data.body,
+      wardrobe: data.wardrobe,
+    });
+    const images = await generateSheet(prompt, data.referenceImage, sheetEndpointName(kind));
+    const roles = SHEET_ROLES[kind];
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i]!;
+      const imageId = makeId('image', crypto.randomUUID().replace(/-/g, ''));
+      const key = imageKey(userId, id, imageId);
+      await storage.put(key, img.bytes, img.mimeType);
+      imageRows.push({
+        id: imageId,
+        generationId: id,
+        userId,
+        storageKey: key,
+        mimeType: img.mimeType,
+        prompt,
+        role: roles[i] ?? `view-${i + 1}`,
+        width: null,
+        height: null,
+      });
+    }
+  } catch (err) {
+    error = err instanceof Error ? err.message : String(err);
+    log('warn', '[sheet] failed', { id, kind, error });
+  }
+
+  const delivered = imageRows.length;
+  if (delivered > 0) await getDb().insert(generationImages).values(imageRows);
+  if (delivered < reserved) {
+    await releaseCredits(userId, reserved - delivered, `gen:${id}`);
+  }
+
+  await finish(id, {
+    status: delivered > 0 ? 'succeeded' : 'failed',
+    creditsSpent: delivered,
+    prompt,
+    error: delivered > 0 ? null : (error ?? 'Sheet generation failed'),
+  });
+  log('info', '[sheet] finished', { id, kind, delivered, ms: Date.now() - started });
 
   startNext(userId);
 }
