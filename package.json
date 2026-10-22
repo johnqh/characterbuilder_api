@@ -1,6 +1,6 @@
 {
   "name": "characterbuilder_api",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "CharacterBuilder backend REST API: FaceSpec CRUD, prompt composition, image generation via shapeshyft, credits",
   "module": "src/index.ts",
   "type": "module",
@@ -16,10 +16,10 @@
   },
   "dependencies": {
     "@hono/zod-validator": "^0.7.5",
-    "@sudobility/auth_service": "^1.1.22",
-    "@sudobility/characterbuilder_types": "^0.1.3",
-    "@sudobility/consumables_service": "^0.1.9",
-    "@sudobility/types": "^1.9.68",
+    "@sudobility/auth_service": "^1.1.24",
+    "@sudobility/characterbuilder_types": "^0.1.4",
+    "@sudobility/consumables_service": "^0.1.11",
+    "@sudobility/types": "^1.9.71",
     "drizzle-orm": "^0.45.0",
     "firebase-admin": "^13.6.0",
     "hono": "^4.10.7",

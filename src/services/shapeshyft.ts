@@ -9,6 +9,7 @@ import {
   FACE_FEATURE_VALUES,
   HEAD_DIRECTIONS,
   faceDistributionsSchema,
+  sanitizeFaceSpec,
   type BodySpec,
   type Demographics,
   type FaceDistributions,
@@ -21,8 +22,22 @@ import { getEnv, shapeShyftConfigured } from '../lib/env-helper';
 import { HttpError } from '../lib/errors';
 import { log } from '../lib/log';
 
+/**
+ * Enum traits that are legitimately ABSENT in some coherent specs, so completeness
+ * must not require them: facial-hair density/colour have no meaning on a
+ * clean-shaven face, and an asymmetry feature is only named when the face is
+ * asymmetric. The caster drops these in exactly those cases.
+ */
+const CONDITIONAL_TRAIT_KEYS = new Set([
+  'facialHairDensity',
+  'facialHairColor',
+  'asymmetryFeature',
+]);
+
 /** Every enum trait the complete spec must carry before it may reach ShapeShyft. */
-const REQUIRED_TRAIT_KEYS = Object.keys(FACE_FEATURE_VALUES);
+const REQUIRED_TRAIT_KEYS = Object.keys(FACE_FEATURE_VALUES).filter(
+  (k) => !CONDITIONAL_TRAIT_KEYS.has(k)
+);
 
 /**
  * The hard completeness gate (requirement R3): a spec sent to ShapeShyft MUST
@@ -79,6 +94,18 @@ function promptEndpointName(): string {
 
 function distributionEndpointName(): string {
   return getEnv('SHAPESHYFT_DISTRIBUTION_ENDPOINT', 'character-distribution')!;
+}
+
+function describeEndpointName(): string {
+  return getEnv('SHAPESHYFT_DESCRIBE_ENDPOINT', 'character-describe')!;
+}
+
+function analyzeEndpointName(): string {
+  return getEnv('SHAPESHYFT_ANALYZE_ENDPOINT', 'character-analyze')!;
+}
+
+function attractiveEndpointName(): string {
+  return getEnv('SHAPESHYFT_ATTRACTIVE_ENDPOINT', 'character-attractive')!;
 }
 
 /** The ShapeShyft endpoint for a given sheet stage (env-overridable per stage). */
@@ -419,6 +446,164 @@ export async function refineDistributionsRemote(
       if (entries.length > 0) clean[trait] = Object.fromEntries(entries);
     }
     return clean as FaceDistributions;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The "Look" half: ask the `character-attractive` endpoint for per-trait odds among
+ * GOOD-LOOKING people of the demographic (full hair, clear even skin, symmetry,
+ * defined features, bright teeth, age-appropriate…). Returns per-trait probability
+ * maps (sanitized to known traits + allowed values); `{}` when the model returns
+ * nothing usable. Throws only when the endpoint is unconfigured/unreachable, so
+ * callers can fall back to the population mode.
+ */
+export async function attractiveDistributionsRemote(
+  demo: Demographics
+): Promise<FaceDistributions> {
+  const base = getEnv('SHAPESHYFT_ENDPOINT_URL');
+  const key = getEnv('SHAPESHYFT_API_KEY');
+  if (!base || !key || !shapeShyftConfigured()) {
+    throw new HttpError('AI_UNAVAILABLE', 'Attractiveness endpoint is not configured');
+  }
+  const name = attractiveEndpointName();
+  const url = `${base.replace(/\/+$/, '')}/${name}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs());
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({ demographics: demo, vocabulary: FACE_FEATURE_VALUES }),
+      signal: controller.signal,
+    });
+    const body = (await response.json()) as ShapeShyftBody;
+    if (!response.ok || body.success === false) {
+      throw new HttpError(
+        'AI_GENERATION_FAILED',
+        `ShapeShyft ${name} failed: ${body.error ?? `HTTP ${response.status}`}`
+      );
+    }
+    const output = (body.data?.output ?? body.output) as
+      | { distributions?: unknown }
+      | undefined;
+    const parsed = faceDistributionsSchema.safeParse(output?.distributions ?? {});
+    if (!parsed.success) return {};
+    const clean: Record<string, Record<string, number>> = {};
+    for (const [trait, dist] of Object.entries(parsed.data)) {
+      const allowed = FACE_FEATURE_VALUES[trait as keyof typeof FACE_FEATURE_VALUES] as
+        | readonly string[]
+        | undefined;
+      if (!allowed) continue;
+      const entries = Object.entries(dist).filter(
+        ([v, p]) => allowed.includes(v) && p > 0
+      );
+      if (entries.length > 0) clean[trait] = Object.fromEntries(entries);
+    }
+    return clean as FaceDistributions;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Describe-to-spec: send a free-text description (plus the trait vocabulary and any
+ * demographics) to the `character-describe` LLM endpoint and get back a PARTIAL
+ * FaceSpec — the structured traits the prose implies. The output is sanitized to
+ * known traits + allowed values, so a stray key/value from the model can never
+ * produce an invalid spec. Throws only when the endpoint is unconfigured/unreachable.
+ */
+export async function describeToSpecRemote(
+  description: string,
+  demo?: Demographics
+): Promise<FaceSpec> {
+  const base = getEnv('SHAPESHYFT_ENDPOINT_URL');
+  const key = getEnv('SHAPESHYFT_API_KEY');
+  if (!base || !key || !shapeShyftConfigured()) {
+    throw new HttpError('AI_UNAVAILABLE', 'Describe endpoint is not configured');
+  }
+  const name = describeEndpointName();
+  const url = `${base.replace(/\/+$/, '')}/${name}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs());
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({
+        description,
+        demographics: demo,
+        vocabulary: FACE_FEATURE_VALUES,
+      }),
+      signal: controller.signal,
+    });
+    const body = (await response.json()) as ShapeShyftBody;
+    if (!response.ok || body.success === false) {
+      throw new HttpError(
+        'AI_GENERATION_FAILED',
+        `ShapeShyft ${name} failed: ${body.error ?? `HTTP ${response.status}`}`
+      );
+    }
+    const output = (body.data?.output ?? body.output) as
+      | { spec?: unknown }
+      | undefined;
+    return sanitizeFaceSpec(output?.spec ?? {});
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Analyze-to-spec (vision): send an uploaded headshot (a `data:image/...` URL,
+ * auto-detected as media by ShapeShyft) plus the vocabulary to the
+ * `character-analyze` endpoint, and read the face into a PARTIAL FaceSpec. Output
+ * is sanitized like describe. Throws only when the endpoint is unconfigured/unreachable.
+ */
+export async function analyzeImageRemote(
+  image: string,
+  demo?: Demographics
+): Promise<FaceSpec> {
+  const base = getEnv('SHAPESHYFT_ENDPOINT_URL');
+  const key = getEnv('SHAPESHYFT_API_KEY');
+  if (!base || !key || !shapeShyftConfigured()) {
+    throw new HttpError('AI_UNAVAILABLE', 'Analyze endpoint is not configured');
+  }
+  const name = analyzeEndpointName();
+  const url = `${base.replace(/\/+$/, '')}/${name}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs());
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({
+        image,
+        demographics: demo,
+        vocabulary: FACE_FEATURE_VALUES,
+      }),
+      signal: controller.signal,
+    });
+    const body = (await response.json()) as ShapeShyftBody;
+    if (!response.ok || body.success === false) {
+      throw new HttpError(
+        'AI_GENERATION_FAILED',
+        `ShapeShyft ${name} failed: ${body.error ?? `HTTP ${response.status}`}`
+      );
+    }
+    const output = (body.data?.output ?? body.output) as
+      | { spec?: unknown }
+      | undefined;
+    return sanitizeFaceSpec(output?.spec ?? {});
   } finally {
     clearTimeout(timer);
   }

@@ -16,6 +16,5 @@ jobs:
   cicd:
     uses: johnqh/workflows/.github/workflows/unified-cicd.yml@main
     with:
-      npm-access: "restricted"
       skip-npm-publish: true
     secrets: inherit

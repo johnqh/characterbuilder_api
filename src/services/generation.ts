@@ -1,11 +1,16 @@
 import { and, desc, eq, lt } from 'drizzle-orm';
 import {
+  applyFemaleFacialHairRule,
   composePrompt,
   generationParamsSchema,
   type ComposeRequest,
   type Generation,
   type GeneratedImage,
   type GenerateRequest,
+  type DescribeRequest,
+  type DescribeResponse,
+  type AnalyzeRequest,
+  type AnalyzeResponse,
   type FaceSpec,
   type Paginated,
   type SheetRequest,
@@ -15,6 +20,7 @@ import { HttpError } from '../lib/errors';
 import { getStorage, imageUrl } from './storage';
 import { getCharacter } from './characters';
 import { enqueueGeneration, enqueueSheet } from './jobs';
+import { describeToSpecRemote, analyzeImageRemote } from './shapeshyft';
 
 /** Resolve the FaceSpec from either a saved character or the inline spec. */
 async function resolveSpec(
@@ -35,6 +41,35 @@ export async function compose(
   const { spec } = await resolveSpec(userId, req);
   const params = generationParamsSchema.partial().parse(req.params ?? {});
   return composePrompt(spec, params);
+}
+
+/**
+ * Describe-to-spec: map a free-text description onto the structured FaceSpec via the
+ * `character-describe` LLM endpoint. Pure inference — no DB write, no credits spent;
+ * the caller merges the returned partial spec into their draft. (The `userId` is
+ * accepted for parity with the other services and future per-user rate limiting.)
+ */
+export async function describe(
+  _userId: string,
+  req: DescribeRequest
+): Promise<DescribeResponse> {
+  const spec = await describeToSpecRemote(req.description, req.demographics);
+  // Keep the inferred spec consistent with the caster: a female never carries
+  // facial hair (the describe LLM can misfire on an ambiguous description).
+  return { spec: applyFemaleFacialHairRule(spec) };
+}
+
+/**
+ * Analyze-to-spec (vision): read an uploaded headshot into a partial FaceSpec via
+ * the `character-analyze` endpoint. No DB write, no credits. The image is transient
+ * (used only for this call); only the inferred spec is returned to the client.
+ */
+export async function analyze(
+  _userId: string,
+  req: AnalyzeRequest
+): Promise<AnalyzeResponse> {
+  const spec = await analyzeImageRemote(req.image, req.demographics);
+  return { spec: applyFemaleFacialHairRule(spec) };
 }
 
 function toGeneratedImage(row: typeof generationImages.$inferSelect): GeneratedImage {

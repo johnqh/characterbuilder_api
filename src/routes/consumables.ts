@@ -1,6 +1,12 @@
 import { Hono } from 'hono';
 import { successResponse } from '@sudobility/characterbuilder_types';
-import { consumables, creditProducts, creditsForProduct, getBalance } from '../services/credits';
+import {
+  consumables,
+  creditProducts,
+  creditsForProduct,
+  getBalance,
+  grantDevCredits,
+} from '../services/credits';
 import { getEnv } from '../lib/env-helper';
 import { log } from '../lib/log';
 
@@ -9,6 +15,21 @@ const router = new Hono();
 router.get('/balance', async (c) =>
   c.json(successResponse(await getBalance(c.get('userId'))))
 );
+
+/**
+ * Dev-only top-up: grant credits to the signed-in user. Gated on AUTH_TEST_MODE
+ * so it is inert in production. Body: `{ credits?: number }` (clamped 1..1000,
+ * default 100). No purchase, no payment — local testing only.
+ */
+router.post('/dev-topup', async (c) => {
+  // Dev convenience only: on by default locally, OFF in production.
+  if (getEnv('NODE_ENV') === 'production' && getEnv('AUTH_TEST_MODE') !== '1') {
+    return c.text('Dev top-up is disabled in production', 403);
+  }
+  const body = (await c.req.json().catch(() => ({}))) as { credits?: number };
+  const credits = Math.min(Math.max(Math.round(body.credits ?? 100), 1), 1000);
+  return c.json(successResponse(await grantDevCredits(c.get('userId'), credits)));
+});
 export default router;
 
 /** Public: the priced catalog. */

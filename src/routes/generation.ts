@@ -1,7 +1,9 @@
 import { Hono } from 'hono';
 import {
+  analyzeRequestSchema,
   composeRequestSchema,
   cursorQuerySchema,
+  describeRequestSchema,
   distributionRequestSchema,
   generateRequestSchema,
   sheetRequestSchema,
@@ -9,8 +11,10 @@ import {
   type ComposeResponse,
 } from '@sudobility/characterbuilder_types';
 import {
+  analyze,
   compose,
   createSheet,
+  describe,
   generate,
   getImageBytes,
   listGenerations,
@@ -33,6 +37,17 @@ router.post(
   '/distributions',
   validate('json', distributionRequestSchema),
   async (c) => c.json(successResponse(await getDistributions(c.req.valid('json'))))
+);
+
+// Free-text description -> inferred (partial) FaceSpec. Pure LLM inference, no DB
+// write and no credits spent; the client merges the result into its draft.
+router.post('/describe', validate('json', describeRequestSchema), async (c) =>
+  c.json(successResponse(await describe(c.get('userId'), c.req.valid('json'))))
+);
+
+// Uploaded headshot -> read (partial) FaceSpec via a vision model. No DB, no credits.
+router.post('/analyze', validate('json', analyzeRequestSchema), async (c) =>
+  c.json(successResponse(await analyze(c.get('userId'), c.req.valid('json'))))
 );
 
 router.post('/generate', validate('json', generateRequestSchema), async (c) => {

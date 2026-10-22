@@ -22,6 +22,7 @@ import {
   SHEET_EXPECTED_COUNT,
   SHEET_ROLES,
   castFaceSpec,
+  resolveDemographics,
   composePrompt,
   generationParamsSchema,
   makeId,
@@ -47,7 +48,6 @@ import {
   generateSheet,
   sheetEndpointName,
 } from './shapeshyft';
-import { getDistributions } from './distribution';
 import { getCharacter } from './characters';
 
 /** Transient reference images, keyed by job id (never persisted — see header). */
@@ -296,7 +296,14 @@ export async function runJob(id: string): Promise<void> {
   const params = generationParamsSchema.parse(job.params);
   const cost = params.count;
   const baseSpec = (job.spec ?? {}) as FaceSpec;
-  const demographics = (job.demographics ?? {}) as Demographics;
+  // Demographic fields (sex, ancestry, age, build) are often set in the SPEC, not
+  // the demographics object. Resolve the effective demographics the same way the
+  // caster does, so the distribution + attractiveness tables actually get the sex
+  // dimorphism / ancestry skew (otherwise a female would be cast sex-neutral).
+  const demographics = resolveDemographics(
+    (job.spec ?? {}) as FaceSpec,
+    (job.demographics ?? {}) as Demographics
+  );
   const referenceImage = pendingReferenceImages.get(id);
   pendingReferenceImages.delete(id);
 
@@ -306,15 +313,18 @@ export async function runJob(id: string): Promise<void> {
   let firstPrompt: string | null = null;
   let lastError: string | null = null;
 
-  // Build the demographic distribution once per job (static base, plus an LLM
-  // sub-population refinement when one is named); every image samples from it.
-  const { distributions } = await getDistributions(demographics);
-
   for (let i = 0; i < cost; i++) {
     try {
-      // Ephemeral: re-cast the unset traits for every image → a new coherent
-      // person each time (explicitly-set traits are kept).
-      const { spec } = castFaceSpec(baseSpec, demographics, { distributions });
+      // Ephemeral: re-cast the unset traits for every image → a new coherent person
+      // each time. The caster resolves the ancestry TAXONOMY itself with a fresh
+      // seed per image, so a STEM ("Asian", "European") descends to a different
+      // concrete sub-population each render, a leaf is honored, and a mixed-ancestry
+      // person inherits each trait from a randomly-chosen parent. Both the population
+      // and the "Look" (attractiveness) distributions come from that node's
+      // first-party data — deterministic, no network call.
+      const { spec } = castFaceSpec(baseSpec, demographics, {
+        conformity: params.conformity,
+      });
       // Enforce completeness BEFORE either compose path, so an incomplete spec
       // (a caster bug) fails the image loudly rather than being quietly rendered
       // by the local fallback — "all traits required" is non-bypassable.

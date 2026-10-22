@@ -98,6 +98,19 @@ export async function releaseCredits(
   });
 }
 
+/**
+ * Dev-only grant: add `credits` to a user's balance (source `free`), for local
+ * testing without a real purchase. The route gates this on AUTH_TEST_MODE.
+ */
+export async function grantDevCredits(userId: string, credits: number) {
+  await consumables().recordPurchase(userId, {
+    credits,
+    source: 'free',
+    product_id: 'dev_topup',
+  });
+  return getBalance(userId);
+}
+
 /** The priced catalog: `CREDIT_PRODUCTS=cb_credits_100:100,cb_credits_500:500`. */
 export function creditProducts(): { productId: string; credits: number }[] {
   return parseCreditProducts(getEnv('CREDIT_PRODUCTS', ''));
